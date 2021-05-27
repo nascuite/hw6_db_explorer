@@ -144,32 +144,33 @@ func getBDinfo(db *sql.DB) ([]tableInfo, error) {
 		if err != nil {
 			return nil, err
 		}
-
-		rowsColumns, err := db.Query("SHOW FULL COLUMNS FROM ?;", tableFromDB.name)
-		if err != nil {
-			return nil, err
-		}
-
-		for rows.Next() {
-			var columnDB columnTable
-
-			err = rowsColumns.Scan(&columnDB.fieldCol,
-				&columnDB.typeCol,
-				&columnDB.collationCol,
-				&columnDB.nullCol,
-				&columnDB.keyCol,
-				&columnDB.defaultCol,
-				&columnDB.extraCol,
-				&columnDB.privilegesCol,
-				&columnDB.commentCol)
-			if err != nil {
-				return nil, err
-			}
-
-			columnsFromDB = append(columnsFromDB, columnDB)
-		}
-
-		rowsColumns.Close()
+		//query := fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`;", tableFromDB.name)
+		//rowsColumns, err := db.Query(query)
+		//if err != nil {
+		//	return nil, err
+		//}
+		//
+		//for rowsColumns.Next() {
+		//	var columnDB columnTable
+		//
+		//	err = rowsColumns.Scan(&columnDB.fieldCol,
+		//		&columnDB.typeCol,
+		//		&columnDB.collationCol,
+		//		&columnDB.nullCol,
+		//		&columnDB.keyCol,
+		//		&columnDB.defaultCol,
+		//		&columnDB.extraCol,
+		//		&columnDB.privilegesCol,
+		//		&columnDB.commentCol)
+		//	if err != nil {
+		//		rowsColumns.Close()
+		//		return nil, err
+		//	}
+		//
+		//	columnsFromDB = append(columnsFromDB, columnDB)
+		//}
+		//
+		//rowsColumns.Close()
 
 		tableFromDB.columns = columnsFromDB
 
@@ -179,6 +180,99 @@ func getBDinfo(db *sql.DB) ([]tableInfo, error) {
 	rows.Close()
 
 	return tablesFromDB, nil
+}
+
+func selectData(sch *queryParametrs, db *sql.DB) (response, error) {
+	var resp map[string]interface{}
+	var tableExist bool
+	var tblCol []columnTable
+	var queryColumnsBuilder, queryBuilder strings.Builder
+
+	if sch.queryRequestParametrs.table != nil {
+		for _, table := range sch.tablesFromBD {
+			if table.name == *sch.queryRequestParametrs.table {
+				tableExist = true
+
+				tblCol = table.columns
+
+				break
+			}
+		}
+
+		if !tableExist {
+			return nil, fmt.Errorf("unknown table")
+		}
+
+		for i, col := range tblCol {
+			if i > 1 {
+				queryColumnsBuilder.WriteString(",")
+			}
+			queryColumnsBuilder.WriteString(`"` + col.fieldCol + `"`)
+		}
+
+		queryBuilder.WriteString("SELECT * ")
+		queryBuilder.WriteString("FROM " + *sch.queryRequestParametrs.table)
+		queryBuilder.WriteString(" limit " + strconv.Itoa(sch.queryRequestParametrs.limit))
+		queryBuilder.WriteString(" offset " + strconv.Itoa(sch.queryRequestParametrs.offset))
+
+		rows, err := db.Query(queryBuilder.String())
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		rowsColumns, err := rows.Columns()
+		if err != nil {
+			return nil, err
+		}
+		rowsColumnTypes, err := rows.ColumnTypes()
+		if err != nil {
+			return nil, err
+		}
+
+		var resultMap []map[string]interface{}
+
+		for rows.Next() {
+			rowValues := make([]interface{}, len(rowsColumns))
+			rowPointers := make([]interface{}, len(rowsColumns))
+
+			for i, _ := range rowValues {
+				rowPointers[i] = &rowValues[i]
+			}
+
+			err = rows.Scan(rowPointers...)
+			if err != nil {
+				return nil, err
+			}
+
+			rowMap := make(map[string]interface{})
+			for i, val := range rowValues {
+				valByte, ok := val.([]byte)
+
+				var v interface{}
+				if ok {
+
+					switch rowsColumnTypes[i].DatabaseTypeName() {
+					case "INT":
+						v, _ = strconv.Atoi(string(valByte))
+					default:
+						v = string(valByte)
+					}
+
+				} else {
+					v = val
+				}
+
+				rowMap[rowsColumns[i]] = v
+			}
+
+			resultMap = append(resultMap, rowMap)
+		}
+
+		resp = response{"response": response{"records": resultMap}}
+	}
+
+	return resp, nil
 }
 
 func (sch *queryParametrs) listPage(h *handler) http.HandlerFunc {
@@ -192,24 +286,17 @@ func (sch *queryParametrs) listPage(h *handler) http.HandlerFunc {
 		}
 
 		if sch.queryRequestParametrs.table != nil {
-			var queryTbl string
-
-			paramsTable := *sch.queryRequestParametrs.table
-
-			for _, t := range sch.tablesFromBD {
-				if paramsTable == t.name {
-					queryTbl = t.name
-					break
+			var err error
+			result, err = selectData(sch, h.DB)
+			if err != nil {
+				status := http.StatusInternalServerError
+				if err.Error() == "unknown table" {
+					status = http.StatusNotFound
 				}
+				writeResponse(w, status, result, err)
+				return
 			}
 
-			if len(queryTbl) < 1 {
-				err := fmt.Errorf("unknown table")
-				writeResponse(w, http.StatusNotFound, nil, err)
-				return
-			} else {
-				result = response{"response": "success"}
-			}
 		} else {
 			var tables []string
 
