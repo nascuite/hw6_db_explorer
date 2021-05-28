@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -28,29 +29,49 @@ type columnTable struct {
 	commentCol    sql.NullString
 }
 
-type tableInfo struct {
-	name    string
-	columns []columnTable
-}
-
 type queryParametrs struct {
-	tablesFromBD          []tableInfo
+	tablesFromBD          map[string][]columnTable
 	queryRequestParametrs requestParametrs
 }
 
 type requestParametrs struct {
 	table  *string
-	id     *string
+	id     *int
 	offset int
 	limit  int
 }
 
 type response map[string]interface{}
 
+func getInsertValueFromRequest(qp *queryParametrs, column string, value string) (string, error) {
+	for i, table := range qp.tablesFromBD {
+
+	}
+
+}
+
+func findPkQueryTable(tableName string, tablesBD map[string][]columnTable) string {
+	var pkCol string
+
+	columns, exists := tablesBD[tableName]
+
+	if exists {
+		for _, tableCol := range columns {
+			if tableCol.keyCol.Valid {
+				if tableCol.keyCol.String == "PRI" {
+					pkCol = tableCol.fieldCol
+					break
+				}
+			}
+		}
+	}
+
+	return pkCol
+}
+
 func writeResponse(w http.ResponseWriter, httpStatus int, resp interface{}, err error) {
 	var result []byte
 	var errJson error
-
 	status := http.StatusOK
 
 	if httpStatus > 0 {
@@ -71,22 +92,38 @@ func writeResponse(w http.ResponseWriter, httpStatus int, resp interface{}, err 
 	w.Write(result)
 }
 
-func (h *handler) getSchema(r *http.Request) (*queryParametrs, error) {
+func (h *handler) getQueryParametrs(r *http.Request) (*queryParametrs, error, int) {
 	var err error
 
 	queryInfo := queryParametrs{}
 
 	queryInfo.queryRequestParametrs, err = getReqParams(r)
 	if err != nil {
-		return nil, err
+		return nil, err, http.StatusInternalServerError
 	}
 
 	queryInfo.tablesFromBD, err = getBDinfo(h.DB)
 	if err != nil {
-		return nil, err
+		return nil, err, http.StatusInternalServerError
 	}
 
-	return &queryInfo, nil
+	if queryInfo.queryRequestParametrs.table != nil {
+		var tableExist bool
+
+		for _, table := range queryInfo.tablesFromBD {
+			if table.name == *queryInfo.queryRequestParametrs.table {
+				tableExist = true
+
+				break
+			}
+		}
+
+		if !tableExist {
+			return &queryInfo, fmt.Errorf("unknown table"), http.StatusNotFound
+		}
+	}
+
+	return &queryInfo, nil, http.StatusOK
 }
 
 func getReqParams(r *http.Request) (requestParametrs, error) {
@@ -94,9 +131,15 @@ func getReqParams(r *http.Request) (requestParametrs, error) {
 
 	for i, u := range strings.Split(r.URL.Path, "/") {
 		if i == 1 && len(u) > 0 {
-			par.table = &u
+			table := u
+			par.table = &table
 		} else if i == 2 && len(u) > 0 {
-			par.id = &u
+			id, err := strconv.Atoi(u)
+			if err != nil {
+				return par, err
+			}
+
+			par.id = &id
 		}
 	}
 
@@ -127,8 +170,8 @@ func getReqParams(r *http.Request) (requestParametrs, error) {
 	return par, nil
 }
 
-func getBDinfo(db *sql.DB) ([]tableInfo, error) {
-	var tablesFromDB []tableInfo
+func getBDinfo(db *sql.DB) (map[string][]columnTable, error) {
+	var tablesFromDB map[string][]columnTable
 	var columnsFromDB []columnTable
 
 	// Получим список таблиц схемы БД
@@ -138,101 +181,104 @@ func getBDinfo(db *sql.DB) ([]tableInfo, error) {
 	}
 
 	for rows.Next() {
-		tableFromDB := tableInfo{}
+		var tableName string
 
-		err := rows.Scan(&tableFromDB.name)
+		err := rows.Scan(&tableName)
 		if err != nil {
 			return nil, err
 		}
-		//query := fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`;", tableFromDB.name)
-		//rowsColumns, err := db.Query(query)
-		//if err != nil {
-		//	return nil, err
-		//}
-		//
-		//for rowsColumns.Next() {
-		//	var columnDB columnTable
-		//
-		//	err = rowsColumns.Scan(&columnDB.fieldCol,
-		//		&columnDB.typeCol,
-		//		&columnDB.collationCol,
-		//		&columnDB.nullCol,
-		//		&columnDB.keyCol,
-		//		&columnDB.defaultCol,
-		//		&columnDB.extraCol,
-		//		&columnDB.privilegesCol,
-		//		&columnDB.commentCol)
-		//	if err != nil {
-		//		rowsColumns.Close()
-		//		return nil, err
-		//	}
-		//
-		//	columnsFromDB = append(columnsFromDB, columnDB)
-		//}
-		//
-		//rowsColumns.Close()
 
-		tableFromDB.columns = columnsFromDB
-
-		tablesFromDB = append(tablesFromDB, tableFromDB)
+		tablesFromDB[tableName] = columnsFromDB
 	}
 
 	rows.Close()
 
-	return tablesFromDB, nil
-}
+	for tableName := range tablesFromDB {
+		query := fmt.Sprintf("SHOW FULL COLUMNS FROM `%s`;", tableName)
 
-func selectData(sch *queryParametrs, db *sql.DB) (response, error) {
-	var resp map[string]interface{}
-	var tableExist bool
-	var tblCol []columnTable
-	var queryColumnsBuilder, queryBuilder strings.Builder
-
-	if sch.queryRequestParametrs.table != nil {
-		for _, table := range sch.tablesFromBD {
-			if table.name == *sch.queryRequestParametrs.table {
-				tableExist = true
-
-				tblCol = table.columns
-
-				break
-			}
-		}
-
-		if !tableExist {
-			return nil, fmt.Errorf("unknown table")
-		}
-
-		for i, col := range tblCol {
-			if i > 1 {
-				queryColumnsBuilder.WriteString(",")
-			}
-			queryColumnsBuilder.WriteString(`"` + col.fieldCol + `"`)
-		}
-
-		queryBuilder.WriteString("SELECT * ")
-		queryBuilder.WriteString("FROM " + *sch.queryRequestParametrs.table)
-		queryBuilder.WriteString(" limit " + strconv.Itoa(sch.queryRequestParametrs.limit))
-		queryBuilder.WriteString(" offset " + strconv.Itoa(sch.queryRequestParametrs.offset))
-
-		rows, err := db.Query(queryBuilder.String())
+		rowsColumns, err := db.Query(query)
 		if err != nil {
 			return nil, err
 		}
+
+		for rowsColumns.Next() {
+			var columnDB columnTable
+
+			err = rowsColumns.Scan(&columnDB.fieldCol,
+				&columnDB.typeCol,
+				&columnDB.collationCol,
+				&columnDB.nullCol,
+				&columnDB.keyCol,
+				&columnDB.defaultCol,
+				&columnDB.extraCol,
+				&columnDB.privilegesCol,
+				&columnDB.commentCol)
+			if err != nil {
+				rowsColumns.Close()
+				return nil, err
+			}
+
+			columnsFromDB = append(columnsFromDB, columnDB)
+		}
+
+		rowsColumns.Close()
+
+		tablesFromDB[tableName] = columnsFromDB
+	}
+
+	return tablesFromDB, nil
+}
+
+func selectData(qp *queryParametrs, db *sql.DB) (response, error, int) {
+	var resp map[string]interface{}
+	var queryBuilder strings.Builder
+
+	if qp.queryRequestParametrs.table != nil {
+		queryBuilder.WriteString("SELECT * ")
+		queryBuilder.WriteString("FROM " + *qp.queryRequestParametrs.table)
+
+		if qp.queryRequestParametrs.id != nil {
+			columnPk := findPkQueryTable(*qp.queryRequestParametrs.table, qp.tablesFromBD)
+			queryBuilder.WriteString(" WHERE ")
+			queryBuilder.WriteString(columnPk)
+			queryBuilder.WriteString(" = ?")
+		}
+
+		queryBuilder.WriteString(" limit " + strconv.Itoa(qp.queryRequestParametrs.limit))
+		queryBuilder.WriteString(" offset " + strconv.Itoa(qp.queryRequestParametrs.offset))
+
+		var err error
+		var rows *sql.Rows
+
+		if qp.queryRequestParametrs.id != nil {
+			rows, err = db.Query(queryBuilder.String(), qp.queryRequestParametrs.id)
+		} else {
+			rows, err = db.Query(queryBuilder.String())
+		}
+
+		if err != nil {
+			fmt.Println(queryBuilder.String())
+			return nil, err, http.StatusInternalServerError
+		}
+
 		defer rows.Close()
 
 		rowsColumns, err := rows.Columns()
 		if err != nil {
-			return nil, err
+			return nil, err, http.StatusInternalServerError
 		}
+
 		rowsColumnTypes, err := rows.ColumnTypes()
 		if err != nil {
-			return nil, err
+			return nil, err, http.StatusInternalServerError
 		}
 
 		var resultMap []map[string]interface{}
+		var rowCount int
 
 		for rows.Next() {
+			rowCount++
+
 			rowValues := make([]interface{}, len(rowsColumns))
 			rowPointers := make([]interface{}, len(rowsColumns))
 
@@ -242,7 +288,7 @@ func selectData(sch *queryParametrs, db *sql.DB) (response, error) {
 
 			err = rows.Scan(rowPointers...)
 			if err != nil {
-				return nil, err
+				return nil, err, http.StatusInternalServerError
 			}
 
 			rowMap := make(map[string]interface{})
@@ -250,6 +296,7 @@ func selectData(sch *queryParametrs, db *sql.DB) (response, error) {
 				valByte, ok := val.([]byte)
 
 				var v interface{}
+
 				if ok {
 
 					switch rowsColumnTypes[i].DatabaseTypeName() {
@@ -269,30 +316,61 @@ func selectData(sch *queryParametrs, db *sql.DB) (response, error) {
 			resultMap = append(resultMap, rowMap)
 		}
 
-		resp = response{"response": response{"records": resultMap}}
+		if rowCount == 0 {
+			return nil, fmt.Errorf("record not found"), http.StatusNotFound
+		}
+
+		if qp.queryRequestParametrs.id != nil && len(resultMap) > 0 {
+			resp = response{"response": response{"record": resultMap[0]}}
+		} else {
+			resp = response{"response": response{"records": resultMap}}
+		}
 	}
 
-	return resp, nil
+	return resp, nil, http.StatusOK
 }
 
-func (sch *queryParametrs) listPage(h *handler) http.HandlerFunc {
+func (qp *queryParametrs) insertPage(h *handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req := make(map[string]interface{})
+
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(r.Body)
+
+		err := json.Unmarshal(buf.Bytes(), &req)
+		if err != nil {
+			writeResponse(w, http.StatusInternalServerError, nil, err)
+		}
+
+		var queryBuilder, columnBuilder, valueBuilder strings.Builder
+
+		queryBuilder.WriteString("INSERT INTO ")
+		queryBuilder.WriteString(*qp.queryRequestParametrs.table)
+		for column, value := range req {
+			if err != nil {
+				writeResponse(w, http.StatusInternalServerError, nil, err)
+			}
+
+			insertValue, err := getInsertValueFromRequest(qp, column, value)
+			if err != nil {
+				writeResponse(w, http.StatusInternalServerError, nil, err)
+			}
+
+			columnBuilder.WriteString(column + ",")
+			valueBuilder.WriteString(insertValue)
+		}
+	}
+}
+
+func (qp *queryParametrs) listPage(h *handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var result response
 
-		if sch == nil {
-			err := fmt.Errorf("sch queryParametrs is nil")
-			writeResponse(w, http.StatusInternalServerError, nil, err)
-			return
-		}
-
-		if sch.queryRequestParametrs.table != nil {
+		if qp.queryRequestParametrs.table != nil {
 			var err error
-			result, err = selectData(sch, h.DB)
+			var status int
+			result, err, status = selectData(qp, h.DB)
 			if err != nil {
-				status := http.StatusInternalServerError
-				if err.Error() == "unknown table" {
-					status = http.StatusNotFound
-				}
 				writeResponse(w, status, result, err)
 				return
 			}
@@ -300,36 +378,44 @@ func (sch *queryParametrs) listPage(h *handler) http.HandlerFunc {
 		} else {
 			var tables []string
 
-			for _, t := range sch.tablesFromBD {
-				tables = append(tables, t.name)
+			for tableName := range qp.tablesFromBD {
+				tables = append(tables, tableName)
 			}
 
 			result = response{"response": response{"tables": tables}}
 		}
+
 		writeResponse(w, http.StatusOK, result, nil)
 	}
 }
 
 func (h *handler) handler(w http.ResponseWriter, r *http.Request) {
-	schema, err := h.getSchema(r)
+	qp, err, status := h.getQueryParametrs(r)
 	if err != nil {
+		writeResponse(w, status, nil, err)
+		return
+	}
+
+	if qp == nil {
+		err := fmt.Errorf("queryParametrs is nil")
 		writeResponse(w, http.StatusInternalServerError, nil, err)
 		return
 	}
 
-	//switch r.Method {
-	//case "DELETE":
-	//	http.HandleFunc("/", h.deletePage)
-	//case "GET":
-	//	http.HandleFunc("/", h.listPage)
-	//case "POST":
-	//	http.HandleFunc("/", h.updatePage)
-	//case "PUT":
-	//	http.HandleFunc("/", h.insertPage)
-	//}
-	//var f =  h.test()
-	listPage := schema.listPage(h)
-	listPage(w, r)
+	var handlerPage http.HandlerFunc
+
+	switch r.Method {
+	case "DELETE":
+		handlerPage = qp.listPage(h)
+	case "GET":
+		handlerPage = qp.listPage(h)
+	case "POST":
+		handlerPage = qp.listPage(h)
+	case "PUT":
+		handlerPage = qp.insertPage(h)
+	}
+
+	handlerPage(w, r)
 }
 
 //NewDbExplorer
