@@ -43,11 +43,42 @@ type requestParametrs struct {
 
 type response map[string]interface{}
 
-func getInsertValueFromRequest(qp *queryParametrs, column string, value string) (string, error) {
-	for i, table := range qp.tablesFromBD {
+func getInsertValueFromRequest(qp *queryParametrs, column string, value interface{}) (string, error) {
+	var insertStr string
 
+	tableColumns, ok := qp.tablesFromBD[*qp.queryRequestParametrs.table]
+	if !ok {
+		return insertStr, fmt.Errorf("query table is nil")
 	}
 
+	for _, col := range tableColumns {
+		if col.fieldCol == column {
+			if col.typeCol == "varchar(255)" || col.typeCol == "text" {
+				insertStr, ok = value.(string)
+				if !ok {
+					return insertStr, fmt.Errorf("Error convert %v to string", value)
+				}
+
+				insertStr = "'" + insertStr + "'"
+			} else if col.typeCol == "int" {
+				if col.keyCol.Valid {
+					if col.keyCol.String == "PRI" {
+						insertStr = ""
+					} else {
+						floatVal, ok := value.(float64)
+						if !ok {
+							return insertStr, fmt.Errorf("Error convert %v to float", value)
+						} else {
+							insertStr = strconv.FormatFloat(floatVal, 'f', -1, 64)
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+
+	return insertStr, nil
 }
 
 func findPkQueryTable(tableName string, tablesBD map[string][]columnTable) string {
@@ -108,15 +139,7 @@ func (h *handler) getQueryParametrs(r *http.Request) (*queryParametrs, error, in
 	}
 
 	if queryInfo.queryRequestParametrs.table != nil {
-		var tableExist bool
-
-		for _, table := range queryInfo.tablesFromBD {
-			if table.name == *queryInfo.queryRequestParametrs.table {
-				tableExist = true
-
-				break
-			}
-		}
+		_, tableExist := queryInfo.tablesFromBD[*queryInfo.queryRequestParametrs.table]
 
 		if !tableExist {
 			return &queryInfo, fmt.Errorf("unknown table"), http.StatusNotFound
@@ -171,8 +194,8 @@ func getReqParams(r *http.Request) (requestParametrs, error) {
 }
 
 func getBDinfo(db *sql.DB) (map[string][]columnTable, error) {
-	var tablesFromDB map[string][]columnTable
-	var columnsFromDB []columnTable
+	tablesFromDB := map[string][]columnTable{}
+	columnsFromDB := make([]columnTable, 0)
 
 	// Получим список таблиц схемы БД
 	rows, err := db.Query("SHOW TABLES;")
@@ -200,6 +223,8 @@ func getBDinfo(db *sql.DB) (map[string][]columnTable, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		columnsFromDB = make([]columnTable, 0)
 
 		for rowsColumns.Next() {
 			var columnDB columnTable
@@ -346,19 +371,46 @@ func (qp *queryParametrs) insertPage(h *handler) http.HandlerFunc {
 
 		queryBuilder.WriteString("INSERT INTO ")
 		queryBuilder.WriteString(*qp.queryRequestParametrs.table)
+
+		var i int
 		for column, value := range req {
-			if err != nil {
-				writeResponse(w, http.StatusInternalServerError, nil, err)
-			}
 
 			insertValue, err := getInsertValueFromRequest(qp, column, value)
 			if err != nil {
 				writeResponse(w, http.StatusInternalServerError, nil, err)
+				return
 			}
 
-			columnBuilder.WriteString(column + ",")
-			valueBuilder.WriteString(insertValue)
+			if len(insertValue) > 0 {
+				if i > 0 {
+					columnBuilder.WriteString(", ")
+					valueBuilder.WriteString(", ")
+				}
+
+				columnBuilder.WriteString(column)
+				valueBuilder.WriteString(insertValue)
+
+				i++
+			}
+
 		}
+		queryBuilder.WriteString(" (" + columnBuilder.String() + ") ")
+		queryBuilder.WriteString(" VALUES ")
+		queryBuilder.WriteString(" ( " + valueBuilder.String() + "); ")
+
+		resultSql, err := h.DB.Exec(queryBuilder.String())
+		if err != nil {
+			writeResponse(w, http.StatusInternalServerError, nil, err)
+			return
+		}
+
+		lastID, err := resultSql.LastInsertId()
+		if err != nil {
+			writeResponse(w, http.StatusInternalServerError, nil, err)
+			return
+		}
+		result := response{"response": response{"id": lastID}}
+		writeResponse(w, http.StatusOK, result, nil)
 	}
 }
 
