@@ -209,7 +209,7 @@ func TestApis(t *testing.T) {
 				},
 			},
 		},
-		// это пример хрупкого теста
+		// 8 это пример хрупкого теста
 		// если много раз вызывать один и тот же тест - записи будут добавляться
 		// поэтому придётся сделать сброс базы каждый раз в PrepareTestData
 		Case{
@@ -251,7 +251,7 @@ func TestApis(t *testing.T) {
 			},
 		},
 
-		// обновление null-поля в таблице
+		//11 обновление null-поля в таблице
 		Case{
 			Path:   "/items/3",
 			Method: http.MethodPost,
@@ -278,7 +278,7 @@ func TestApis(t *testing.T) {
 			},
 		},
 
-		// обновление null-поля в таблице
+		//13 обновление null-поля в таблице
 		Case{
 			Path:   "/items/3",
 			Method: http.MethodPost,
@@ -305,7 +305,7 @@ func TestApis(t *testing.T) {
 			},
 		},
 
-		// ошибки
+		//15 ошибки
 		Case{
 			Path:   "/items/3",
 			Method: http.MethodPost,

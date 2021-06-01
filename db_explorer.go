@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -43,42 +44,65 @@ type requestParametrs struct {
 
 type response map[string]interface{}
 
-func getInsertValueFromRequest(qp *queryParametrs, column string, value interface{}) (string, error) {
-	var insertStr string
+func prepareQueryValue(qp *queryParametrs, column string, value interface{}, isInsert bool) (*string, error) {
+	var preparedString string
 
 	tableColumns, ok := qp.tablesFromBD[*qp.queryRequestParametrs.table]
 	if !ok {
-		return insertStr, fmt.Errorf("query table is nil")
+		return nil, fmt.Errorf("query table is nil")
 	}
 
 	for _, col := range tableColumns {
 		if col.fieldCol == column {
-			if col.typeCol == "varchar(255)" || col.typeCol == "text" {
-				insertStr, ok = value.(string)
-				if !ok {
-					return insertStr, fmt.Errorf("Error convert %v to string", value)
+			if value == nil {
+				if col.nullCol == "YES" {
+					preparedString = "NULL"
+					return &preparedString, nil
+				} else {
+					return nil, fmt.Errorf("field %v have invalid type", col.fieldCol)
 				}
+			}
 
-				insertStr = "'" + insertStr + "'"
-			} else if col.typeCol == "int" {
-				if col.keyCol.Valid {
-					if col.keyCol.String == "PRI" {
-						insertStr = ""
+			if col.keyCol.Valid {
+				if col.keyCol.String == "PRI" {
+					if isInsert {
+						preparedString = ""
+						return &preparedString, nil
 					} else {
-						floatVal, ok := value.(float64)
-						if !ok {
-							return insertStr, fmt.Errorf("Error convert %v to float", value)
-						} else {
-							insertStr = strconv.FormatFloat(floatVal, 'f', -1, 64)
-						}
+						return nil, fmt.Errorf("field %v have invalid type", col.fieldCol)
 					}
 				}
 			}
+
+			var typeOk bool
+
+			switch value.(type) {
+			case int:
+				if col.typeCol == "int" {
+					typeOk = true
+					preparedString = strconv.Itoa(value.(int))
+				}
+			case float64:
+				if col.typeCol == "int" {
+					typeOk = true
+					preparedString = strconv.FormatFloat(value.(float64), 'f', -1, 64)
+				}
+			case string:
+				if col.typeCol == "varchar(255)" || col.typeCol == "text" {
+					typeOk = true
+					preparedString = "'" + value.(string) + "'"
+				}
+			}
+
+			if !typeOk {
+				return nil, fmt.Errorf("field %v have invalid type", col.fieldCol)
+			}
+
 			break
 		}
 	}
 
-	return insertStr, nil
+	return &preparedString, nil
 }
 
 func findPkQueryTable(tableName string, tablesBD map[string][]columnTable) string {
@@ -355,6 +379,67 @@ func selectData(qp *queryParametrs, db *sql.DB) (response, error, int) {
 	return resp, nil, http.StatusOK
 }
 
+func (qp *queryParametrs) updatePage(h *handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		req := make(map[string]interface{})
+
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(r.Body)
+
+		err := json.Unmarshal(buf.Bytes(), &req)
+		if err != nil {
+			writeResponse(w, http.StatusInternalServerError, nil, err)
+			return
+		}
+
+		pkCol := findPkQueryTable(*qp.queryRequestParametrs.table, qp.tablesFromBD)
+
+		var queryBuilder, columnBuilder strings.Builder
+		var i int
+
+		for columnName, columnValue := range req {
+			queryValue, err := prepareQueryValue(qp, columnName, columnValue, false)
+			if err != nil {
+				writeResponse(w, http.StatusBadRequest, nil, err)
+				return
+			}
+
+			if i > 0 {
+				columnBuilder.WriteString(",")
+			}
+
+			columnBuilder.WriteString(columnName + " = " + *queryValue)
+
+			i++
+		}
+
+		queryBuilder.WriteString("UPDATE ")
+		queryBuilder.WriteString(*qp.queryRequestParametrs.table)
+		queryBuilder.WriteString(" SET ")
+		queryBuilder.WriteString(columnBuilder.String())
+		queryBuilder.WriteString(" ")
+		queryBuilder.WriteString(" WHERE " + pkCol + " = ?;")
+
+		fmt.Println(queryBuilder.String())
+
+		resultSql, err := h.DB.Exec(queryBuilder.String(), *qp.queryRequestParametrs.id)
+		if err != nil {
+			writeResponse(w, http.StatusInternalServerError, nil, err)
+			return
+		}
+
+		rows, err := resultSql.RowsAffected()
+		if err != nil {
+			writeResponse(w, http.StatusInternalServerError, nil, err)
+			return
+		}
+
+		result := response{"response": response{"updated": rows}}
+
+		writeResponse(w, http.StatusOK, result, nil)
+	}
+}
+
 func (qp *queryParametrs) insertPage(h *handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req := make(map[string]interface{})
@@ -365,35 +450,34 @@ func (qp *queryParametrs) insertPage(h *handler) http.HandlerFunc {
 		err := json.Unmarshal(buf.Bytes(), &req)
 		if err != nil {
 			writeResponse(w, http.StatusInternalServerError, nil, err)
+			return
 		}
 
 		var queryBuilder, columnBuilder, valueBuilder strings.Builder
-
-		queryBuilder.WriteString("INSERT INTO ")
-		queryBuilder.WriteString(*qp.queryRequestParametrs.table)
-
 		var i int
-		for column, value := range req {
 
-			insertValue, err := getInsertValueFromRequest(qp, column, value)
+		for column, value := range req {
+			insertValue, err := prepareQueryValue(qp, column, value, true)
 			if err != nil {
 				writeResponse(w, http.StatusInternalServerError, nil, err)
 				return
 			}
 
-			if len(insertValue) > 0 {
+			if len(*insertValue) > 0 {
 				if i > 0 {
 					columnBuilder.WriteString(", ")
 					valueBuilder.WriteString(", ")
 				}
 
 				columnBuilder.WriteString(column)
-				valueBuilder.WriteString(insertValue)
+				valueBuilder.WriteString(*insertValue)
 
 				i++
 			}
-
 		}
+
+		queryBuilder.WriteString("INSERT INTO ")
+		queryBuilder.WriteString(*qp.queryRequestParametrs.table)
 		queryBuilder.WriteString(" (" + columnBuilder.String() + ") ")
 		queryBuilder.WriteString(" VALUES ")
 		queryBuilder.WriteString(" ( " + valueBuilder.String() + "); ")
@@ -409,7 +493,9 @@ func (qp *queryParametrs) insertPage(h *handler) http.HandlerFunc {
 			writeResponse(w, http.StatusInternalServerError, nil, err)
 			return
 		}
+
 		result := response{"response": response{"id": lastID}}
+
 		writeResponse(w, http.StatusOK, result, nil)
 	}
 }
@@ -433,6 +519,10 @@ func (qp *queryParametrs) listPage(h *handler) http.HandlerFunc {
 			for tableName := range qp.tablesFromBD {
 				tables = append(tables, tableName)
 			}
+
+			sort.Slice(tables, func(i, j int) bool {
+				return tables[i] < tables[j]
+			})
 
 			result = response{"response": response{"tables": tables}}
 		}
@@ -462,7 +552,7 @@ func (h *handler) handler(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		handlerPage = qp.listPage(h)
 	case "POST":
-		handlerPage = qp.listPage(h)
+		handlerPage = qp.updatePage(h)
 	case "PUT":
 		handlerPage = qp.insertPage(h)
 	}
