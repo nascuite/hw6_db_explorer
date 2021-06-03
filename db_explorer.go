@@ -151,6 +151,7 @@ func getPkQueryTable(tableName string, tablesBD map[string][]columnTable) string
 func writeResponse(w http.ResponseWriter, httpStatus int, resp interface{}, err error) {
 	var result []byte
 	var errJson error
+
 	status := http.StatusOK
 
 	if httpStatus > 0 {
@@ -421,8 +422,8 @@ func (qp *queryParametrs) deletePage(h *handler) http.HandlerFunc {
 func (qp *queryParametrs) updatePage(h *handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		request := make(map[string]interface{})
-		buf := new(bytes.Buffer)
 
+		buf := new(bytes.Buffer)
 		buf.ReadFrom(r.Body)
 
 		err := json.Unmarshal(buf.Bytes(), &request)
@@ -496,8 +497,8 @@ func (qp *queryParametrs) updatePage(h *handler) http.HandlerFunc {
 func (qp *queryParametrs) insertPage(h *handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req := make(map[string]interface{})
-		buf := new(bytes.Buffer)
 
+		buf := new(bytes.Buffer)
 		buf.ReadFrom(r.Body)
 
 		err := json.Unmarshal(buf.Bytes(), &req)
